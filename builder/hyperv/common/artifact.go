@@ -13,7 +13,7 @@ import (
 )
 
 // This is the common builder ID to all of these artifacts.
-const BuilderId = "MSOpenTech.hyperv"
+const BuilderId = "jamesleech.hyperv"
 
 // Artifact is the result of running the VirtualBox builder, namely a set
 // of files associated with the resulting machine.

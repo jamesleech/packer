@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"github.com/mitchellh/multistep"
 	"github.com/mitchellh/packer/packer"
-	"github.com/MSOpenTech/packer-hyperv/packer/communicator/powershell"
 )
 
 type StepSetRemoting struct {

@@ -4,11 +4,12 @@ package googlecompute
 
 import (
 	"fmt"
+	"log"
+
 	"github.com/mitchellh/multistep"
 	"github.com/mitchellh/packer/common"
+	"github.com/mitchellh/packer/helper/communicator"
 	"github.com/mitchellh/packer/packer"
-	"log"
-	"time"
 )
 
 // The unique ID for this builder.
@@ -35,7 +36,7 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 // representing a GCE machine image.
 func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packer.Artifact, error) {
 	driver, err := NewDriverGCE(
-		ui, b.config.ProjectId, &b.config.account, &b.config.clientSecrets)
+		ui, b.config.ProjectId, &b.config.account)
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +50,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 
 	// Build the steps.
 	steps := []multistep.Step{
+		new(StepCheckExistingImage),
 		&StepCreateSSHKey{
 			Debug:        b.config.PackerDebug,
 			DebugKeyPath: fmt.Sprintf("gce_%s.pem", b.config.PackerBuildName),
@@ -59,16 +61,14 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 		&StepInstanceInfo{
 			Debug: b.config.PackerDebug,
 		},
-		&common.StepConnectSSH{
-			SSHAddress:     sshAddress,
-			SSHConfig:      sshConfig,
-			SSHWaitTimeout: 5 * time.Minute,
+		&communicator.StepConnect{
+			Config:    &b.config.Comm,
+			Host:      commHost,
+			SSHConfig: sshConfig,
 		},
 		new(common.StepProvision),
-		new(StepUpdateGcloud),
+		new(StepTeardownInstance),
 		new(StepCreateImage),
-		new(StepUploadImage),
-		new(StepRegisterImage),
 	}
 
 	// Run the steps.

@@ -7,4 +7,10 @@
 .DS_Store
 .vagrant
 test/.env
+<<<<<<< HEAD
 *.exe
+=======
+
+website/.bundle
+website/vendor
+>>>>>>> upstream/master

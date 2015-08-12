@@ -7,7 +7,10 @@ import (
 
 	"github.com/mitchellh/packer/common"
 	"github.com/mitchellh/packer/common/uuid"
+	"github.com/mitchellh/packer/helper/communicator"
+	"github.com/mitchellh/packer/helper/config"
 	"github.com/mitchellh/packer/packer"
+	"github.com/mitchellh/packer/template/interpolate"
 )
 
 // Config is the configuration structure for the GCE builder. It stores
@@ -15,12 +18,12 @@ import (
 // state of the config object.
 type Config struct {
 	common.PackerConfig `mapstructure:",squash"`
+	Comm                communicator.Config `mapstructure:",squash"`
 
-	AccountFile       string `mapstructure:"account_file"`
-	ClientSecretsFile string `mapstructure:"client_secrets_file"`
-	ProjectId         string `mapstructure:"project_id"`
+	AccountFile string `mapstructure:"account_file"`
+	ProjectId   string `mapstructure:"project_id"`
 
-	BucketName           string            `mapstructure:"bucket_name"`
+	DiskName             string            `mapstructure:"disk_name"`
 	DiskSizeGb           int64             `mapstructure:"disk_size"`
 	ImageName            string            `mapstructure:"image_name"`
 	ImageDescription     string            `mapstructure:"image_description"`
@@ -30,37 +33,33 @@ type Config struct {
 	Network              string            `mapstructure:"network"`
 	SourceImage          string            `mapstructure:"source_image"`
 	SourceImageProjectId string            `mapstructure:"source_image_project_id"`
-	SSHUsername          string            `mapstructure:"ssh_username"`
-	SSHPort              uint              `mapstructure:"ssh_port"`
-	RawSSHTimeout        string            `mapstructure:"ssh_timeout"`
 	RawStateTimeout      string            `mapstructure:"state_timeout"`
 	Tags                 []string          `mapstructure:"tags"`
+	UseInternalIP        bool              `mapstructure:"use_internal_ip"`
 	Zone                 string            `mapstructure:"zone"`
 
 	account         accountFile
-	clientSecrets   clientSecretsFile
-	instanceName    string
 	privateKeyBytes []byte
-	sshTimeout      time.Duration
 	stateTimeout    time.Duration
-	tpl             *packer.ConfigTemplate
+	ctx             interpolate.Context
 }
 
 func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	c := new(Config)
-	md, err := common.DecodeConfig(c, raws...)
+	err := config.Decode(c, &config.DecodeOpts{
+		Interpolate:        true,
+		InterpolateContext: &c.ctx,
+		InterpolateFilter: &interpolate.RenderFilter{
+			Exclude: []string{
+				"run_command",
+			},
+		},
+	}, raws...)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	c.tpl, err = packer.NewConfigTemplate()
-	if err != nil {
-		return nil, nil, err
-	}
-	c.tpl.UserVars = c.PackerUserVars
-
-	// Prepare the errors
-	errs := common.CheckUnusedConfig(md)
+	var errs *packer.MultiError
 
 	// Set defaults.
 	if c.Network == "" {
@@ -76,78 +75,39 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 	}
 
 	if c.ImageName == "" {
-		c.ImageName = "packer-{{timestamp}}"
+		img, err := interpolate.Render("packer-{{timestamp}}", nil)
+		if err != nil {
+			errs = packer.MultiErrorAppend(errs,
+				fmt.Errorf("Unable to parse image name: %s ", err))
+			c.ImageName = img
+		}
 	}
 
 	if c.InstanceName == "" {
 		c.InstanceName = fmt.Sprintf("packer-%s", uuid.TimeOrderedUUID())
 	}
 
-	if c.MachineType == "" {
-		c.MachineType = "n1-standard-1"
+	if c.DiskName == "" {
+		c.DiskName = c.InstanceName
 	}
 
-	if c.RawSSHTimeout == "" {
-		c.RawSSHTimeout = "5m"
+	if c.MachineType == "" {
+		c.MachineType = "n1-standard-1"
 	}
 
 	if c.RawStateTimeout == "" {
 		c.RawStateTimeout = "5m"
 	}
 
-	if c.SSHUsername == "" {
-		c.SSHUsername = "root"
+	if c.Comm.SSHUsername == "" {
+		c.Comm.SSHUsername = "root"
 	}
 
-	if c.SSHPort == 0 {
-		c.SSHPort = 22
-	}
-
-	// Process Templates
-	templates := map[string]*string{
-		"account_file":        &c.AccountFile,
-		"client_secrets_file": &c.ClientSecretsFile,
-
-		"bucket_name":             &c.BucketName,
-		"image_name":              &c.ImageName,
-		"image_description":       &c.ImageDescription,
-		"instance_name":           &c.InstanceName,
-		"machine_type":            &c.MachineType,
-		"network":                 &c.Network,
-		"project_id":              &c.ProjectId,
-		"source_image":            &c.SourceImage,
-		"source_image_project_id": &c.SourceImageProjectId,
-		"ssh_username":            &c.SSHUsername,
-		"ssh_timeout":             &c.RawSSHTimeout,
-		"state_timeout":           &c.RawStateTimeout,
-		"zone":                    &c.Zone,
-	}
-
-	for n, ptr := range templates {
-		var err error
-		*ptr, err = c.tpl.Process(*ptr, nil)
-		if err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Error processing %s: %s", n, err))
-		}
+	if es := c.Comm.Prepare(&c.ctx); len(es) > 0 {
+		errs = packer.MultiErrorAppend(errs, es...)
 	}
 
 	// Process required parameters.
-	if c.BucketName == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("a bucket_name must be specified"))
-	}
-
-	if c.AccountFile == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("an account_file must be specified"))
-	}
-
-	if c.ClientSecretsFile == "" {
-		errs = packer.MultiErrorAppend(
-			errs, errors.New("a client_secrets_file must be specified"))
-	}
-
 	if c.ProjectId == "" {
 		errs = packer.MultiErrorAppend(
 			errs, errors.New("a project_id must be specified"))
@@ -163,14 +123,6 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 			errs, errors.New("a zone must be specified"))
 	}
 
-	// Process timeout settings.
-	sshTimeout, err := time.ParseDuration(c.RawSSHTimeout)
-	if err != nil {
-		errs = packer.MultiErrorAppend(
-			errs, fmt.Errorf("Failed parsing ssh_timeout: %s", err))
-	}
-	c.sshTimeout = sshTimeout
-
 	stateTimeout, err := time.ParseDuration(c.RawStateTimeout)
 	if err != nil {
 		errs = packer.MultiErrorAppend(
@@ -182,13 +134,6 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 		if err := loadJSON(&c.account, c.AccountFile); err != nil {
 			errs = packer.MultiErrorAppend(
 				errs, fmt.Errorf("Failed parsing account file: %s", err))
-		}
-	}
-
-	if c.ClientSecretsFile != "" {
-		if err := loadJSON(&c.clientSecrets, c.ClientSecretsFile); err != nil {
-			errs = packer.MultiErrorAppend(
-				errs, fmt.Errorf("Failed parsing client secrets file: %s", err))
 		}
 	}
 
